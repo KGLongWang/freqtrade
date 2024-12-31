@@ -1,7 +1,5 @@
 ## 均线交叉策略通知
 基于 Freqtrade 框架的均线交叉策略实时通知系统。
-<img src="https://github.com/user-attachments/assets/48894d72-c3a7-49c8-abdc-e3d90bb08044" width="400"/>
-
 
 ## 功能特点
 - 实时监控多个时间周期的均线交叉
@@ -24,10 +22,12 @@
 ## 微信通知配置
 # 贡献
 - 欢迎提交 Pull Requests 或 Issues 来完善此策略！
+- 项目地址：[strategy]([((https://github.com/KGLongWang/freqtrade))]
 
-项目地址：[strategy]([((https://github.com/KGLongWang/freqtrade))]
+# 许可证
+- MIT License
 
-许可证
-MIT License
+# 自己部署的wx通知群
+<img src="https://github.com/user-attachments/assets/48894d72-c3a7-49c8-abdc-e3d90bb08044" width="200"/>
 
 注：此项目仅供学习研究使用，不构成投资建议。请谨慎使用，风险自负。
