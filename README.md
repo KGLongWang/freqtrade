@@ -23,10 +23,10 @@
 - Python 3.10+
 - Freqtrade 环境
 ## 微信通知配置
-贡献
-欢迎提交 Pull Requests 或 Issues 来完善此策略！
+# 贡献
+- 欢迎提交 Pull Requests 或 Issues 来完善此策略！
 
-项目地址：
+项目地址：[strategy]([((https://github.com/KGLongWang/freqtrade))]
 
 许可证
 MIT License
