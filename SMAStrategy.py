@@ -10,7 +10,10 @@ from typing import Dict, Optional, Union, Tuple
 import logging
 import pytz
 
+import time
 import json
+import requests
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,7 @@ import talib.abstract as ta
 import pandas_ta as pta
 from technical import qtpylib
 
-class SMAStrategy(IStrategy):
+class TestStrategy(IStrategy):
     """
     This is a strategy template to get you started.
     More information in https://www.freqtrade.io/en/latest/strategy-customization/
@@ -150,132 +153,54 @@ class SMAStrategy(IStrategy):
 
         self.notification_states = {}
         self.timeframes = ['1m', '5m', '15m', '1h', '4h', '1d']
+        self.pairs = self.config['exchange']['pair_whitelist']
         self.sma_pairs = [("5", "10"), ("10", "30"), ("5", "30")]
         self.sma_periods = [5, 10, 30]
         self.trend_summary = {}
-        for tf in self.timeframes:
-            for period1, period2 in self.sma_pairs:
-                cross_key = f"sma{period1}_{tf}_cross_sma{period2}_{tf}"
-                self.notification_states[f"{cross_key}_last_signal"] = None
+        for pair in self.pairs:
+            for tf in self.timeframes:
+                for period1, period2 in self.sma_pairs:
+                    cross_key = f"{pair}:sma{period1}_{tf}_cross_sma{period2}_{tf}"
+                    self.notification_states[f"{cross_key}_last_signal"] = None
 
-            there_cross_key = f"sma5_{tf}_cross_sma10_{tf}_cross_sma30_{tf}"
-            self.notification_states[f"{there_cross_key}_last_signal"] = None
-        logger.info(f"🔔 notification_states: {self.notification_states}")
+                three_cross_key = f"{pair}:sma5_{tf}_cross_sma10_{tf}_cross_sma30_{tf}"
+                self.notification_states[f"{three_cross_key}_last_signal"] = None
 
     def bot_start(self, **kwargs) -> None:
         self.dp.send_msg(f"🤖 交易机器人启动成功！启动时间: {datetime.now()}")
 
     def informative_pairs(self):
-        """
-        Define additional, informative pair/interval combinations to be cached from the exchange.
-        These pair/interval combinations are non-tradeable, unless they are part
-        of the whitelist as well.
-        For more information, please consult the documentation
-        :return: List of tuples in the format (pair, interval)
-            Sample: return [("ETH/USDT", "5m"),
-                            ("BTC/USDT", "15m"),
-                            ]
-        """
-        return [("DOGE/USDT:USDT", "1m"),
-                ("DOGE/USDT:USDT", "5m"),
-                ("DOGE/USDT:USDT", "15m"),
-                ("DOGE/USDT:USDT", "1h"),
-                ("DOGE/USDT:USDT", "4h"),
-                ("DOGE/USDT:USDT", "1d"),
-                ("DOGE/USDT:USDT", "1w"),
-                ]
+        # 从配置文件的白名单中获取交易对
+        pairs = self.config['exchange']['pair_whitelist']
+        informative_pairs = []
+        
+        # 为每个交易对生成所有时间周期的组合
+        for pair in pairs:
+            for timeframe in self.timeframes:
+                informative_pairs.append((pair, timeframe))
+
+        return informative_pairs
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         交易法主要指标
         """
-        def get_h1_and_l1_cross(dataframe):
-            dataframe['hh'] = (
-                dataframe['high'] +
-                dataframe['high'].rolling(2).max() * 2 +
-                dataframe['high'].rolling(4).max() * 2 +
-                dataframe['high'].rolling(8).max() * 2 +
-                dataframe['high'].rolling(13).max() +
-                dataframe['high'].rolling(40).max() +
-                dataframe['high'].rolling(20).max()
-            ) / 10
+        #整合不同时间K线周期数据
+        inf_dfs = {}
+        for tf in self.timeframes:
+            inf_dfs[tf] = self.dp.get_pair_dataframe(metadata['pair'], tf)
+        for tf in self.timeframes:
+            inf_dfs[tf] = inf_dfs[tf].add_suffix(f'_{tf}')
 
-            dataframe['ll'] = (
-                dataframe['low'] +
-                dataframe['low'].rolling(2).min() * 2 +
-                dataframe['low'].rolling(4).min() * 2 +
-                dataframe['low'].rolling(8).min() * 2 +
-                dataframe['low'].rolling(13).min() +
-                dataframe['low'].rolling(40).min() +
-                dataframe['low'].rolling(20).min()
-            ) / 10
+        target_index = dataframe.index
+        for tf in self.timeframes:
+            new_index = target_index[-len(inf_dfs[tf]):]
+            inf_dfs[tf] = inf_dfs[tf].set_index(new_index)
+            inf_dfs[tf] = inf_dfs[tf].reindex(target_index)
 
-            h1_conditions = (
-                (dataframe['hh'] < dataframe['hh'].shift(1)) &
-                (dataframe['ll'] < dataframe['ll'].shift(1)) &
-                (dataframe['open'].shift(1) > dataframe['close']) &
-                (dataframe['open'] > dataframe['close'])
-            )
-            l1_conditions = (
-                (dataframe['hh'] > dataframe['hh'].shift(1)) &
-                (dataframe['ll'] > dataframe['ll'].shift(1)) &
-                (dataframe['open'].shift(1) < dataframe['close']) &
-                (dataframe['open'] < dataframe['close'])
-            )
+        merged_pair = pd.concat([inf_dfs[tf] for tf in self.timeframes], axis=1)
 
-            dataframe['h1'] = np.where(
-                h1_conditions,
-                dataframe['hh'].shift(2),
-                np.nan
-            )
-            dataframe['l1'] = np.where(
-                l1_conditions,
-                dataframe['ll'].shift(2),
-                np.nan
-            )
-
-            dataframe['h1'] = dataframe['h1'].ffill()
-            dataframe['l1'] = dataframe['l1'].ffill()
-
-            dataframe['h1_or_l1_cross'] = np.where(
-                qtpylib.crossed(dataframe['close'], dataframe['h1'], direction='above'),
-                1,
-                np.where(qtpylib.crossed(dataframe['close'], dataframe['l1'], direction='below'), 0, np.nan)
-            )
-            dataframe['h1_or_l1_cross_state'] = dataframe['h1_or_l1_cross']
-            dataframe['h1_or_l1_cross_state'] = dataframe['h1_or_l1_cross_state'].ffill() #1 是上穿， 0 是下穿
-
-            return dataframe
-
-        dataframe = get_h1_and_l1_cross(dataframe)
-
-        inf_1m = self.dp.get_pair_dataframe(metadata['pair'], '1m')
-        inf_5m = self.dp.get_pair_dataframe(metadata['pair'], '5m')
-        inf_15m = self.dp.get_pair_dataframe(metadata['pair'], '15m')
-        inf_1h = self.dp.get_pair_dataframe(metadata['pair'], '1h')
-        inf_4h = self.dp.get_pair_dataframe(metadata['pair'], '4h')
-        inf_1d = self.dp.get_pair_dataframe(metadata['pair'], '1d')
-        inf_1w = self.dp.get_pair_dataframe(metadata['pair'], '1w')
-
-        inf_1m = inf_1m.add_suffix('_1m')
-        inf_5m = inf_5m.add_suffix('_5m')
-        inf_15m = inf_15m.add_suffix('_15m')
-        inf_1h = inf_1h.add_suffix('_1h')
-        inf_4h = inf_4h.add_suffix('_4h')
-        inf_1d = inf_1d.add_suffix('_1d')
-        inf_1w = inf_1w.add_suffix('_1w')
-
-        target_index = inf_1m.index
-        inf_1d_new_index = target_index[-len(inf_1d):]
-        inf_1d = inf_1d.set_index(inf_1d_new_index)
-        inf_1d = inf_1d.reindex(target_index)
-
-        inf_1w_new_index = target_index[-len(inf_1w):]
-        inf_1w = inf_1w.set_index(inf_1w_new_index)
-        inf_1w = inf_1w.reindex(target_index)
-
-        merged_pair = pd.concat([dataframe, inf_1m, inf_5m, inf_15m, inf_1h, inf_4h, inf_1d, inf_1w], axis=1)
-
+        #获取实时数据
         try:
             ticker = self.dp.ticker(metadata['pair'])
         except Exception as e:
@@ -283,121 +208,137 @@ class SMAStrategy(IStrategy):
             logger.error(f"获取ticker数据失败: {e}")
             return dataframe
         
-        #MA计算
+        #获取实时MA数据
         current_close = ticker['last']
         for tf in self.timeframes:
             rt_close = (pd.concat([merged_pair[f'close_{tf}'], pd.Series(current_close)]).iloc[1:])
             for period in self.sma_periods:
-                sma_name = f'sma{period}_{tf}'   #column_name = 'sma5_1m'
+                sma_name = f'sma{period}_{tf}'   # 'sma5_1m'
                 merged_pair[sma_name] = ta.SMA(rt_close, timeperiod=period).round(6)
-                logger.info(f"sma_name: {sma_name}, sma_value: {merged_pair[sma_name]}")
 
+        #获取实时均线交叉数据
         for tf in self.timeframes:
+            #两两交叉
             for period1, period2 in self.sma_pairs:
                 cross_dataframe = detect_ma_crossover(merged_pair,
                     f'sma{period1}_{tf}',
                     f'sma{period2}_{tf}'
                 )
+            #三线交叉
             cross_dataframe = detect_triple_ma_cross(cross_dataframe, f'sma5_{tf}', f'sma10_{tf}', f'sma30_{tf}')
-            self.update_trend_summary(cross_dataframe, tf)
-        self.trend_msg = get_trend_msg(self.trend_summary)
 
+        #更新不同周期均线排列状态
         for tf in self.timeframes:
-            self.check_cross_alert(cross_dataframe, tf, current_close)
+            self.update_trend_summary(cross_dataframe, tf)
+
+        #从self.trend_summary均线排列状态
+        self.trend_msg = self.get_trend_msg()
+
+        #发送均线交叉提醒
+        for tf in self.timeframes:
+            self.check_cross_alert(cross_dataframe, metadata, tf, current_close)
 
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # 1周均线测试
-        dataframe['enter_long'] = 0
-        dataframe['enter_short'] = 0
+
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # 1周均线测试
-        dataframe['exit_long'] = 0
-        dataframe['exit_short'] = 0
 
         return dataframe
 
-    def get_cross_msg(self, tf: str, period1: str, period2: str, current_close, is_golden: bool):
+    def get_cross_msg(self, tf: str, metadata: dict, period1: str, period2: str, current_close, is_golden: bool):
         """发送单个均线交叉提醒"""
         msg = f"""
-⚡️ 均线穿越提醒 
-━━━━━━━━━━━━━━━
-📊 时间周期: {tf}
-⚡️ 信号类型: {'金叉' if is_golden else '死叉'}
-🎯 具体表现: MA{period1}均线{'上穿' if is_golden else '下穿'}MA{period2}均线
-💹 当前价格: {current_close}
-━━━━━━━━━━━━━━━
+🪙 币种:{metadata['pair'].split('/')[0]}   
+━━━━━━━━━━━━━
+📅 周期:{tf}
+⚡️ 信号:均线交叉 
+━━━━━━━━━━━━━
+🔀 类型: {'✅金叉' if is_golden else '❌死叉'}
+🎯 表现: {period1}{'↗️' if is_golden else '↘️'}{period2}
+💹 价格: {current_close}
+━━━━━━━━━━━━━       
 """
         return msg
 
-    def get_three_cross_msg(self, tf, current_close, is_golden: bool):
+    def get_three_cross_msg(self, tf, metadata: dict, current_close, is_golden: bool):
         msg = f"""
-🔔🔔 三线穿越提醒 
-━━━━━━━━━━━━━━━
-📊 时间周期: {tf}
-⚡️ 信号类型: {'金叉' if is_golden else '死叉'}
-🎯 具体表现:  {'多头排列' if is_golden else '空头排列'}
-💹 当前价格: {current_close}
-━━━━━━━━━━━━━━━
+🪙 币种:{metadata['pair'].split('/')[0]}  
+━━━━━━━━━━━━━
+📅 周期:{tf}
+⚡️ 信号:三线交叉 
+━━━━━━━━━━━━━
+🔀 类型: {'✅金叉' if is_golden else '❌死叉'}
+🎯 表现: {'⏫' if is_golden else '⏬'}
+💹 价格: {current_close}
+━━━━━━━━━━━━━
 """
         return msg
     
     def update_trend_summary(self, dataframe, tf):
         latest = dataframe.iloc[-1]
+        #输出三线交叉状态
         if latest[f'sma5_{tf}_cross_sma10_{tf}_cross_sma30_{tf}_state'].item() == 1:
-            trend = "多头排列"
+            trend = "⬆️"
         elif latest[f'sma5_{tf}_cross_sma10_{tf}_cross_sma30_{tf}_state'].item() == 0:
-            trend = "空头排列" 
+            trend = "⬇️" 
         else:
-            trend = "未形成排列"
+            trend = "➖"
         self.trend_summary[tf] = trend
 
-    def check_cross_alert(self, dataframe, tf, current_close):
+    def check_cross_alert(self, dataframe, metadata, tf, current_close):
         latest = dataframe.iloc[-1]
         for period1, period2 in self.sma_pairs:
             cross_key = f"sma{period1}_{tf}_cross_sma{period2}_{tf}"
                 # 检查金叉
-            if latest[cross_key].item()  == 1 and self.notification_states[f"{cross_key}_last_signal"] != 1:
-                alert_msg = self.trend_msg + self.get_cross_msg(tf, period1, period2, current_close, True)
-                self.dp.send_msg(alert_msg)
-                self.notification_states[f"{cross_key}_last_signal"] = 1
+            if latest[cross_key].item()  == 1 and self.notification_states[f"{metadata['pair']}:{cross_key}_last_signal"] != 1:
+                cross_msg = self.get_cross_msg(tf, metadata, period1, period2, current_close, True)
+                alert_msg = cross_msg + self.trend_msg
 
-                # 检查死叉
-            elif latest[cross_key].item() == 0 and self.notification_states[f"{cross_key}_last_signal"] != 0: 
-                cross_msg = self.get_cross_msg(tf, period1, period2, current_close, False) 
-                alert_msg = self.trend_msg + cross_msg
+                self.notification_states[f"{metadata['pair']}:{cross_key}_last_signal"] = 1
                 self.dp.send_msg(alert_msg)
-                self.notification_states[f"{cross_key}_last_signal"] = 0
+                requests.post("http://139.9.42.166:8000//send_message", json={"message": alert_msg})
+                time.sleep(0.1)
+                # 检查死叉
+            elif latest[cross_key].item() == 0 and self.notification_states[f"{metadata['pair']}:{cross_key}_last_signal"] != 0: 
+                cross_msg = self.get_cross_msg(tf, metadata, period1, period2, current_close, False) 
+                alert_msg = cross_msg + self.trend_msg
+
+                self.notification_states[f"{metadata['pair']}:{cross_key}_last_signal"] = 0
+                self.dp.send_msg(alert_msg)
+                requests.post("http://139.9.42.166:8000//send_message", json={"message": alert_msg})
+                time.sleep(0.1)
 
         there_cross_key = f"sma5_{tf}_cross_sma10_{tf}_cross_sma30_{tf}"
-        if latest[there_cross_key].item() == 1 and self.notification_states[f"{there_cross_key}_last_signal"] != 1:
-            there_cross_msg = self.get_three_cross_msg(tf, current_close, True)
-            alert_msg = self.trend_msg + there_cross_msg
+        if latest[there_cross_key].item() == 1 and self.notification_states[f"{metadata['pair']}:{there_cross_key}_last_signal"] != 1:
+            there_cross_msg = self.get_three_cross_msg(tf, metadata, current_close, True)
+            alert_msg = there_cross_msg + self.trend_msg
+
             self.dp.send_msg(alert_msg)
-            self.notification_states[f"{there_cross_key}_last_signal"] = 1
+            self.notification_states[f"{metadata['pair']}:{there_cross_key}_last_signal"] = 1
+            requests.post("http://139.9.42.166:8000//send_message", json={"message": alert_msg})
+            time.sleep(0.1)
 
-        elif latest[there_cross_key].item() == 0 and self.notification_states[f"{there_cross_key}_last_signal"] != 0:
-            there_cross_msg = self.get_three_cross_msg(tf, current_close, False)
-            alert_msg = self.trend_msg + there_cross_msg
+        elif latest[there_cross_key].item() == 0 and self.notification_states[f"{metadata['pair']}:{there_cross_key}_last_signal"] != 0:
+            there_cross_msg = self.get_three_cross_msg(tf, metadata, current_close, False)
+            alert_msg = there_cross_msg + self.trend_msg
+
             self.dp.send_msg(alert_msg)
-            self.notification_states[f"{there_cross_key}_last_signal"] = 0 
-
-def get_trend_msg(trend_summary):
-    msg = "━━━━━━━━━━━━━━━\n"
-    msg += "🔔 各周期均线排列状态\n"
-    msg += "━━━━━━━━━━━━━━━\n"
-    msg += f"⏰ 1MIN: {trend_summary.get('1m', 'NA')}\n"
-    msg += f"⏰ 5MIN: {trend_summary.get('5m', 'NA')}\n"
-    msg += f"⏰ 15MIN: {trend_summary.get('15m', 'NA')}\n"
-    msg += f"⏰ 1H: {trend_summary.get('1h', 'NA')}\n"
-    msg += f"⏰ 4H: {trend_summary.get('4h', 'NA')}\n"
-    msg += f"⏰ 1D: {trend_summary.get('1d', 'NA')}\n"
-    msg += "━━━━━━━━━━━━━━━\n"
-
-    return msg
+            self.notification_states[f"{metadata['pair']}:{there_cross_key}_last_signal"] = 0 
+            requests.post("http://139.9.42.166:8000//send_message", json={"message": alert_msg})
+            time.sleep(0.1)
+            
+    def get_trend_msg(self):
+        msg =  "\n"
+        msg += "🔔 各周期趋势\n"
+        msg += "━━━━━━━━━━━━━\n"
+        for tf in self.timeframes:
+            msg += f"⏰ {tf}\t: {self.trend_summary.get(tf, 'NA')}\n"
+        
+        msg += "━━━━━━━━━━━━━"
+        return msg
 
 def detect_ma_crossover(dataframe: pd.DataFrame, fast_ma: str, slow_ma: str) -> pd.DataFrame:
     """
@@ -405,7 +346,7 @@ def detect_ma_crossover(dataframe: pd.DataFrame, fast_ma: str, slow_ma: str) -> 
     
     参数:
         dataframe: 数据框
-        fast_ma: 快速移动平均线列名
+        fast_ma: 快速移动平均线列名  
         slow_ma: 慢速移动平均线列名
     
     返回:
@@ -432,7 +373,7 @@ def detect_triple_ma_cross(dataframe: pd.DataFrame, ma1: str, ma2: str, ma3: str
     
     参数:
         dataframe: 数据框
-        ma1: 第一条均线(最快)
+        ma1: 第一条均线(���快)
         ma2: 第二条均线
         ma3: 第三条均线(最慢)
     
@@ -446,18 +387,22 @@ def detect_triple_ma_cross(dataframe: pd.DataFrame, ma1: str, ma2: str, ma3: str
     # 获取双线交叉的状态列名
     cross1_2 = f'{ma1}_cross_{ma2}'
     cross2_3 = f'{ma2}_cross_{ma3}'
+    cross1_3 = f'{ma1}_cross_{ma3}'
     state1_2 = f'{ma1}_cross_{ma2}_state'
     state2_3 = f'{ma2}_cross_{ma3}_state'
+    state1_3 = f'{ma1}_cross_{ma3}_state'
     
-    # 检测多重交叉信号
+    # 检测三条均线交叉信号
     bullish_cross = (
-        (dataframe[cross1_2] == 1) & (dataframe[state2_3] == 1) |
-        (dataframe[state1_2] == 1) & (dataframe[cross2_3] == 1)
+        ((dataframe[cross1_2] == 1) & (dataframe[state2_3] == 1)) |
+        ((dataframe[cross2_3] == 1) & (dataframe[state1_2] == 1)) |
+        ((dataframe[cross1_3] == 1) & (dataframe[state2_3] == 1) & (dataframe[state1_2] == 1))
     )
     
     bearish_cross = (
-        (dataframe[cross1_2] == 0) & (dataframe[state2_3] == 0) |
-        (dataframe[state1_2] == 0) & (dataframe[cross2_3] == 0)
+        ((dataframe[cross1_2] == 0) & (dataframe[state2_3] == 0)) |
+        ((dataframe[cross2_3] == 0) & (dataframe[state1_2] == 0)) |
+        ((dataframe[cross1_3] == 0) & (dataframe[state2_3] == 0) & (dataframe[state1_2] == 0))
     )
     
     # 生成交叉信号
@@ -468,11 +413,89 @@ def detect_triple_ma_cross(dataframe: pd.DataFrame, ma1: str, ma2: str, ma3: str
     # 检测整体趋势状态
     bullish_state = (dataframe[state1_2] == 1) & (dataframe[state2_3] == 1)
     bearish_state = (dataframe[state1_2] == 0) & (dataframe[state2_3] == 0)
-    
+    chaos_trend = (
+        # 1. MA5和MA10的关系与MA10和MA30的关系不一致
+        ((dataframe[state1_2] == 1) & (dataframe[state2_3] == 0)) |  # MA5>MA10但MA10<MA30
+        ((dataframe[state1_2] == 0) & (dataframe[state2_3] == 1)) |  # MA5<MA10但MA10>MA30
+        
+        # 2. MA5和MA30的关系与MA5和MA10的关系不一致
+        ((dataframe[state1_3] == 1) & (dataframe[state1_2] == 0)) |  # MA5>MA30但MA5<MA10
+        ((dataframe[state1_3] == 0) & (dataframe[state1_2] == 1)) |  # MA5<MA30但MA5>MA10
+        
+        # 3. MA5和MA30的关系与MA10和MA30的关系不一致
+        ((dataframe[state1_3] == 1) & (dataframe[state2_3] == 0)) |  # MA5>MA30但MA10<MA30
+        ((dataframe[state1_3] == 0) & (dataframe[state2_3] == 1)) |  # MA5<MA30但MA10>MA30
+
+        # 4. 三线交叉时的瞬间混乱状态
+        ((dataframe[cross1_2] == 1) & (dataframe[state2_3] == 0)) |  # MA5上穿MA10时MA10在MA30下方
+        ((dataframe[cross1_2] == 0) & (dataframe[state2_3] == 1)) |  # MA5下穿MA10时MA10在MA30上方
+        ((dataframe[cross2_3] == 1) & (dataframe[state1_2] == 0)) |  # MA10上穿MA30时MA5在MA10下方
+        ((dataframe[cross2_3] == 0) & (dataframe[state1_2] == 1))    # MA10下穿MA30时MA5在MA10上方
+    )
+
     # 生成状态信号
     dataframe[state_name] = np.nan
     dataframe.loc[bullish_state, state_name] = 1
     dataframe.loc[bearish_state, state_name] = 0
+    dataframe.loc[chaos_trend, state_name] = 2
     dataframe[state_name] = dataframe[state_name].ffill()  # 填充状态
     
+    return dataframe
+
+def get_h1_and_l1_cross(dataframe):
+    dataframe['hh'] = (
+        dataframe['high'] +
+        dataframe['high'].rolling(2).max() * 2 +
+        dataframe['high'].rolling(4).max() * 2 +
+        dataframe['high'].rolling(8).max() * 2 +
+        dataframe['high'].rolling(13).max() +
+        dataframe['high'].rolling(40).max() +
+        dataframe['high'].rolling(20).max()
+    ) / 10
+
+    dataframe['ll'] = (
+        dataframe['low'] +
+        dataframe['low'].rolling(2).min() * 2 +
+        dataframe['low'].rolling(4).min() * 2 +
+        dataframe['low'].rolling(8).min() * 2 +
+        dataframe['low'].rolling(13).min() +
+        dataframe['low'].rolling(40).min() +
+        dataframe['low'].rolling(20).min()
+    ) / 10
+
+    h1_conditions = (
+        (dataframe['hh'] < dataframe['hh'].shift(1)) &
+        (dataframe['ll'] < dataframe['ll'].shift(1)) &
+        (dataframe['open'].shift(1) > dataframe['close']) &
+        (dataframe['open'] > dataframe['close'])
+    )
+    l1_conditions = (
+        (dataframe['hh'] > dataframe['hh'].shift(1)) &
+        (dataframe['ll'] > dataframe['ll'].shift(1)) &
+        (dataframe['open'].shift(1) < dataframe['close']) &
+        (dataframe['open'] < dataframe['close'])
+    )
+
+    dataframe['h1'] = np.where(
+        h1_conditions,
+        dataframe['hh'].shift(2),
+        np.nan
+    )
+    dataframe['l1'] = np.where(
+        l1_conditions,
+        dataframe['ll'].shift(2),
+        np.nan
+    )
+
+    dataframe['h1'] = dataframe['h1'].ffill()
+    dataframe['l1'] = dataframe['l1'].ffill()
+
+    dataframe['h1_or_l1_cross'] = np.where(
+        qtpylib.crossed(dataframe['close'], dataframe['h1'], direction='above'),
+        1,
+        np.where(qtpylib.crossed(dataframe['close'], dataframe['l1'], direction='below'), 0, np.nan)
+    )
+    dataframe['h1_or_l1_cross_state'] = dataframe['h1_or_l1_cross']
+    dataframe['h1_or_l1_cross_state'] = dataframe['h1_or_l1_cross_state'].ffill() #1 是上穿， 0 是下穿
+
     return dataframe
