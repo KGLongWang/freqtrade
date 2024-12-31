@@ -1,7 +1,6 @@
 ## 均线交叉策略通知
 基于 Freqtrade 框架的均线交叉策略实时通知系统。
-![1806a7088a883acc7c2aeeaeb8641ef](https://github.com/user-attachments/assets/48894d72-c3a7-49c8-abdc-e3d90bb08044)
-<img src="[图片URL](https://github.com/user-attachments/assets/48894d72-c3a7-49c8-abdc-e3d90bb08044)" width="400"/>
+<img src="https://github.com/user-attachments/assets/48894d72-c3a7-49c8-abdc-e3d90bb08044" width="400"/>
 
 
 ## 功能特点
